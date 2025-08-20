@@ -109,6 +109,66 @@ function Disable-AutoUpdates {
     }
 }
 
+# Function to disable lock screen and screen saver
+function Disable-LockScreen {
+    Write-Log "Configuring system to disable lock screen and screen saver..."
+    
+    try {
+        # Disable lock screen for all users
+        $personalizationPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
+        if (-not (Test-Path $personalizationPath)) {
+            New-Item -Path $personalizationPath -Force | Out-Null
+            Write-Log "Created Personalization registry path"
+        }
+        Set-ItemProperty -Path $personalizationPath -Name "NoLockScreen" -Value 1 -Type DWord
+        Write-Log "Disabled lock screen via Group Policy"
+        
+        # Disable screen saver for current user and system-wide
+        $screenSaverPath = "HKCU:\Control Panel\Desktop"
+        Set-ItemProperty -Path $screenSaverPath -Name "ScreenSaveActive" -Value "0" -Type String
+        Set-ItemProperty -Path $screenSaverPath -Name "ScreenSaverIsSecure" -Value "0" -Type String
+        Set-ItemProperty -Path $screenSaverPath -Name "ScreenSaveTimeOut" -Value "0" -Type String
+        Write-Log "Disabled screen saver for current user"
+        
+        # Disable system screen saver policy
+        $systemScreenSaverPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop"
+        if (-not (Test-Path $systemScreenSaverPath)) {
+            New-Item -Path $systemScreenSaverPath -Force | Out-Null
+            Write-Log "Created system screen saver policy path"
+        }
+        Set-ItemProperty -Path $systemScreenSaverPath -Name "ScreenSaveActive" -Value "0" -Type String
+        Set-ItemProperty -Path $systemScreenSaverPath -Name "ScreenSaverIsSecure" -Value "0" -Type String
+        Write-Log "Disabled system screen saver policy"
+        
+        # Disable automatic lock after inactivity
+        $sessionPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+        Set-ItemProperty -Path $sessionPath -Name "InactivityTimeoutSecs" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        Write-Log "Disabled automatic lock after inactivity"
+        
+        # Disable lock screen on resume from sleep (if sleep were to occur)
+        $powerPath = "HKLM:\SOFTWARE\Policies\Microsoft\Power\PowerSettings\0e796bdb-100d-47d6-a2d5-f7d2daa51f51"
+        if (-not (Test-Path $powerPath)) {
+            New-Item -Path $powerPath -Force | Out-Null
+            Write-Log "Created power lock screen policy path"
+        }
+        Set-ItemProperty -Path $powerPath -Name "ACSettingIndex" -Value 0 -Type DWord
+        Set-ItemProperty -Path $powerPath -Name "DCSettingIndex" -Value 0 -Type DWord
+        Write-Log "Disabled lock screen on resume from sleep"
+        
+        # Additional setting to prevent Ctrl+Alt+Del screen timeout
+        $winlogonPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+        Set-ItemProperty -Path $winlogonPath -Name "ScreenSaverGracePeriod" -Value "0" -Type String -ErrorAction SilentlyContinue
+        Write-Log "Disabled Winlogon screen saver grace period"
+        
+        Write-Log "Lock screen and screen saver disabled successfully" "SUCCESS"
+        return $true
+    }
+    catch {
+        Write-Log "Error disabling lock screen: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
 # Function to disable Windows Defender scheduled scans during active hours
 function Configure-DefenderSchedule {
     Write-Log "Configuring Windows Defender to minimize interruptions..."
@@ -133,45 +193,104 @@ function Configure-DefenderSchedule {
 
 # Function to create a keep-alive mechanism
 function Start-KeepAlive {
-    Write-Log "Starting keep-alive mechanism for continuous operation..."
+    Write-Log "Starting enhanced keep-alive mechanism for continuous operation..."
     
     # Import required assemblies for system interaction
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     
+    # Add Windows API functions to prevent system from going idle
+    Add-Type @'
+        using System;
+        using System.Runtime.InteropServices;
+        
+        public class Win32 {
+            [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+            public static extern uint SetThreadExecutionState(uint esFlags);
+            
+            [DllImport("user32.dll")]
+            public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, uint dwExtraInfo);
+            
+            [DllImport("user32.dll")]
+            public static extern bool SetCursorPos(int X, int Y);
+            
+            public const uint ES_CONTINUOUS = 0x80000000;
+            public const uint ES_SYSTEM_REQUIRED = 0x00000001;
+            public const uint ES_DISPLAY_REQUIRED = 0x00000002;
+            public const uint ES_USER_PRESENT = 0x00000004;
+            
+            public const byte VK_SHIFT = 0x10;
+            public const uint KEYEVENTF_KEYUP = 0x0002;
+        }
+'@
+    
+    # Set execution state to prevent system sleep and keep display active
+    $result = [Win32]::SetThreadExecutionState([Win32]::ES_CONTINUOUS -bor [Win32]::ES_SYSTEM_REQUIRED -bor [Win32]::ES_DISPLAY_REQUIRED -bor [Win32]::ES_USER_PRESENT)
+    Write-Log "Set thread execution state to prevent sleep (Result: $result)"
+    
     $keepAliveRunning = $true
     $iteration = 0
+    $lastActivity = Get-Date
     
-    Write-Log "Keep-alive mechanism started. Press Ctrl+C to stop."
+    Write-Log "Enhanced keep-alive mechanism started. Press Ctrl+C to stop."
+    Write-Log "This will prevent lock screen by simulating activity every 30 seconds."
     
     try {
         while ($keepAliveRunning) {
             $iteration++
+            $currentTime = Get-Date
             
-            # Simulate user activity every 5 minutes to prevent sleep
-            [System.Windows.Forms.Cursor]::Position = [System.Drawing.Point]::new(
-                [System.Windows.Forms.Cursor]::Position.X + 1, 
-                [System.Windows.Forms.Cursor]::Position.Y
-            )
+            # More aggressive activity simulation every 30 seconds to prevent lock screen
+            # Alternate between different types of activity
+            $activityType = $iteration % 4
             
-            Start-Sleep -Seconds 1
-            
-            [System.Windows.Forms.Cursor]::Position = [System.Drawing.Point]::new(
-                [System.Windows.Forms.Cursor]::Position.X - 1, 
-                [System.Windows.Forms.Cursor]::Position.Y
-            )
-            
-            # Log status every hour (720 iterations of 5 minutes)
-            if ($iteration % 720 -eq 0) {
-                Write-Log "Keep-alive active - Iteration $iteration ($(($iteration * 5) / 60) hours running)"
+            switch ($activityType) {
+                0 {
+                    # Move mouse cursor slightly
+                    $currentPos = [System.Windows.Forms.Cursor]::Position
+                    [Win32]::SetCursorPos($currentPos.X + 1, $currentPos.Y)
+                    Start-Sleep -Milliseconds 100
+                    [Win32]::SetCursorPos($currentPos.X, $currentPos.Y)
+                }
+                1 {
+                    # Send a harmless shift key press (won't interfere with typing)
+                    [Win32]::keybd_event([Win32]::VK_SHIFT, 0, 0, 0)
+                    Start-Sleep -Milliseconds 50
+                    [Win32]::keybd_event([Win32]::VK_SHIFT, 0, [Win32]::KEYEVENTF_KEYUP, 0)
+                }
+                2 {
+                    # Move cursor to a different position and back
+                    $currentPos = [System.Windows.Forms.Cursor]::Position
+                    [Win32]::SetCursorPos($currentPos.X, $currentPos.Y + 1)
+                    Start-Sleep -Milliseconds 100
+                    [Win32]::SetCursorPos($currentPos.X, $currentPos.Y)
+                }
+                3 {
+                    # Refresh execution state to ensure system stays awake
+                    [Win32]::SetThreadExecutionState([Win32]::ES_CONTINUOUS -bor [Win32]::ES_SYSTEM_REQUIRED -bor [Win32]::ES_DISPLAY_REQUIRED -bor [Win32]::ES_USER_PRESENT)
+                }
             }
             
-            # Wait 5 minutes before next keep-alive signal
-            Start-Sleep -Seconds 300
+            $lastActivity = $currentTime
+            
+            # Log status every 2 hours (240 iterations of 30 seconds)
+            if ($iteration % 240 -eq 0) {
+                $hoursRunning = [math]::Round(($iteration * 30) / 3600, 1)
+                Write-Log "Enhanced keep-alive active - Iteration $iteration ($hoursRunning hours running)"
+                Write-Log "Last activity: $($lastActivity.ToString('HH:mm:ss')) - Preventing lock screen and sleep"
+            }
+            
+            # Wait 30 seconds before next activity (much more frequent than before)
+            Start-Sleep -Seconds 30
         }
     }
     catch {
         Write-Log "Keep-alive mechanism interrupted: $($_.Exception.Message)" "WARNING"
+    }
+    finally {
+        # Restore normal execution state when stopping
+        [Win32]::SetThreadExecutionState([Win32]::ES_CONTINUOUS)
+        Write-Log "Restored normal thread execution state"
     }
 }
 
@@ -195,6 +314,20 @@ function Show-Status {
         Write-Log "Auto-restart disabled: No (Bad - Registry not configured)"
     }
     
+    # Check lock screen settings
+    $personalizationPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
+    if (Test-Path $personalizationPath) {
+        $noLockScreen = Get-ItemProperty -Path $personalizationPath -Name "NoLockScreen" -ErrorAction SilentlyContinue
+        Write-Log "Lock screen disabled: $(if ($noLockScreen.NoLockScreen -eq 1) { 'Yes (Good)' } else { 'No (Bad)' })"
+    } else {
+        Write-Log "Lock screen disabled: No (Bad - Registry not configured)"
+    }
+    
+    # Check screen saver settings
+    $screenSaverPath = "HKCU:\Control Panel\Desktop"
+    $screenSaverActive = Get-ItemProperty -Path $screenSaverPath -Name "ScreenSaveActive" -ErrorAction SilentlyContinue
+    Write-Log "Screen saver disabled: $(if ($screenSaverActive.ScreenSaveActive -eq '0') { 'Yes (Good)' } else { 'No (Bad)' })"
+    
     Write-Log "=== End Status ===" "INFO"
 }
 
@@ -216,6 +349,35 @@ function Restore-OriginalSettings {
         if (Test-Path $registryPath) {
             Remove-ItemProperty -Path $registryPath -Name "NoAutoRebootWithLoggedOnUsers" -ErrorAction SilentlyContinue
             Remove-ItemProperty -Path $registryPath -Name "AUOptions" -ErrorAction SilentlyContinue
+        }
+        
+        # Restore lock screen settings
+        $personalizationPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
+        if (Test-Path $personalizationPath) {
+            Remove-ItemProperty -Path $personalizationPath -Name "NoLockScreen" -ErrorAction SilentlyContinue
+        }
+        
+        # Restore screen saver settings for current user
+        $screenSaverPath = "HKCU:\Control Panel\Desktop"
+        Set-ItemProperty -Path $screenSaverPath -Name "ScreenSaveActive" -Value "1" -Type String -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $screenSaverPath -Name "ScreenSaveTimeOut" -Value "600" -Type String -ErrorAction SilentlyContinue
+        
+        # Remove system screen saver policy
+        $systemScreenSaverPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop"
+        if (Test-Path $systemScreenSaverPath) {
+            Remove-ItemProperty -Path $systemScreenSaverPath -Name "ScreenSaveActive" -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $systemScreenSaverPath -Name "ScreenSaverIsSecure" -ErrorAction SilentlyContinue
+        }
+        
+        # Remove inactivity timeout setting
+        $sessionPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+        Remove-ItemProperty -Path $sessionPath -Name "InactivityTimeoutSecs" -ErrorAction SilentlyContinue
+        
+        # Remove power lock screen policy
+        $powerPath = "HKLM:\SOFTWARE\Policies\Microsoft\Power\PowerSettings\0e796bdb-100d-47d6-a2d5-f7d2daa51f51"
+        if (Test-Path $powerPath) {
+            Remove-ItemProperty -Path $powerPath -Name "ACSettingIndex" -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $powerPath -Name "DCSettingIndex" -ErrorAction SilentlyContinue
         }
         
         Write-Log "Original settings restored successfully" "SUCCESS"
@@ -276,6 +438,11 @@ function Main {
         $success = $false
     }
     
+    # Disable lock screen and screen saver
+    if (-not (Disable-LockScreen)) {
+        $success = $false
+    }
+    
     if ($success) {
         Write-Log "=== INSTALLATION COMPLETE ===" "SUCCESS"
         Write-Log "Your research laptop is now configured for 24/7 operation" "SUCCESS"
@@ -283,10 +450,11 @@ function Main {
         Write-Log "IMPORTANT NOTES:" "INFO"
         Write-Log "1. Your laptop will no longer sleep automatically" "INFO"
         Write-Log "2. Windows will not restart automatically for updates" "INFO"
-        Write-Log "3. You can manually check for updates when convenient" "INFO"
-        Write-Log "4. Run with -KeepAlive parameter for continuous keep-alive" "INFO"
-        Write-Log "5. Run with -Status to check current configuration" "INFO"
-        Write-Log "6. Run with -Uninstall to restore original settings" "INFO"
+        Write-Log "3. Lock screen and screen saver have been disabled" "INFO"
+        Write-Log "4. You can manually check for updates when convenient" "INFO"
+        Write-Log "5. Run with -KeepAlive parameter for continuous keep-alive" "INFO"
+        Write-Log "6. Run with -Status to check current configuration" "INFO"
+        Write-Log "7. Run with -Uninstall to restore original settings" "INFO"
         Write-Log "" "INFO"
         Write-Log "For continuous operation, consider running:" "INFO"
         Write-Log "PowerShell -ExecutionPolicy Bypass -File KeepResearchLaptopAwake.ps1 -KeepAlive" "INFO"
